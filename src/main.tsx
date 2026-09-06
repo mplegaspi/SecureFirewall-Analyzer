@@ -12,6 +12,7 @@ import {
   Download,
   FileSearch,
   Filter,
+  Flag,
   Globe2,
   HardDriveUpload,
   ListTree,
@@ -206,6 +207,20 @@ type NetworkObject = {
   sourceLine: string;
 };
 
+type SecurityActivitySeverity = "critical" | "high" | "medium" | "low" | "info";
+type SecurityActivityCategory = "Blocked Traffic" | "Allowed Traffic" | "Configuration Change" | "Policy Exposure" | "Platform";
+
+type SecurityActivityFlag = {
+  id: string;
+  severity: SecurityActivitySeverity;
+  category: SecurityActivityCategory;
+  title: string;
+  detail: string;
+  timestamp?: string;
+  sourceLine?: string;
+  animated: boolean;
+};
+
 type Analysis = {
   fileName: string;
   size: number;
@@ -227,6 +242,7 @@ type Analysis = {
   failover: FailoverInfo;
   bestPractices: BestPracticeCheck[];
   networkObjects: NetworkObject[];
+  securityActivity: SecurityActivityFlag[];
 };
 
 type SortKey =
@@ -701,6 +717,94 @@ function buildBestPracticeChecks({
   });
 
   return checks.filter((check) => platform === "UNKNOWN" || check.appliesTo === "BOTH" || check.appliesTo === platform);
+}
+
+function buildSecurityActivityFlags(
+  events: SyslogEvent[],
+  rules: PolicyRule[],
+  findings: Finding[],
+): SecurityActivityFlag[] {
+  const flags: SecurityActivityFlag[] = [];
+  const add = (flag: Omit<SecurityActivityFlag, "id" | "animated">) => {
+    const duplicate = flags.some((item) => item.title === flag.title && item.detail === flag.detail && item.sourceLine === flag.sourceLine);
+    if (duplicate) return;
+    flags.push({
+      ...flag,
+      id: `security-activity-${flags.length + 1}`,
+      animated: flag.severity === "critical" || flag.severity === "high",
+    });
+  };
+
+  events.forEach((event) => {
+    const normalized = event.message.toLowerCase();
+    const isBlocked = /\b(deny|denied|drop|dropped|block|blocked|reject|rejected)\b/.test(normalized);
+    const isAllowed = /\b(built|permit|permitted|allow|allowed|accepted)\b/.test(normalized);
+    const isConfiguration = /\b(command|executed|configuration|configure|config)\b/.test(normalized);
+    const severity: SecurityActivitySeverity = event.severity <= 2
+      ? "critical"
+      : event.severity <= 4
+        ? "high"
+        : event.severity === 5
+          ? "medium"
+          : event.severity === 6
+            ? "low"
+            : "info";
+    const category: SecurityActivityCategory = isBlocked
+      ? "Blocked Traffic"
+      : isConfiguration
+        ? "Configuration Change"
+        : isAllowed
+          ? "Allowed Traffic"
+          : "Platform";
+    const title = isBlocked
+      ? "Blocked traffic detected"
+      : isConfiguration
+        ? "Configuration activity detected"
+        : isAllowed
+          ? "Allowed connection activity"
+          : `${event.facility}-${event.messageId} security event`;
+
+    add({ severity, category, title, detail: event.message, timestamp: event.timestamp, sourceLine: event.sourceLine });
+  });
+
+  rules.forEach((rule) => {
+    const allowsTraffic = /^(permit|allow|trust)$/i.test(rule.action);
+    const broadSource = rule.source.some((value) => /^(any|any4|any6)$/i.test(value.trim()));
+    const broadDestination = rule.destination.some((value) => /^(any|any4|any6)$/i.test(value.trim()));
+    if (allowsTraffic && broadSource && broadDestination) {
+      add({
+        severity: "high",
+        category: "Policy Exposure",
+        title: "Broad allow rule",
+        detail: `${rule.ruleName || rule.id} permits traffic from any source to any destination (${rule.protocol.join(", ")}).`,
+        sourceLine: rule.sourceLine,
+      });
+    }
+
+    const deniesTraffic = /^(deny|block)$/i.test(rule.action);
+    if (deniesTraffic && /^(disabled|not specified)$/i.test(rule.logging.trim())) {
+      add({
+        severity: "medium",
+        category: "Policy Exposure",
+        title: "Deny rule without confirmed logging",
+        detail: `${rule.ruleName || rule.id} blocks traffic, but logging is ${rule.logging.toLowerCase()}.`,
+        sourceLine: rule.sourceLine,
+      });
+    }
+  });
+
+  findings.filter((finding) => finding.severity !== "info").forEach((finding) => {
+    add({
+      severity: finding.severity === "critical" ? "critical" : "medium",
+      category: "Platform",
+      title: finding.label,
+      detail: finding.detail,
+      sourceLine: finding.evidence,
+    });
+  });
+
+  const severityRank: Record<SecurityActivitySeverity, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  return flags.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
 }
 
 function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysis {
@@ -1217,6 +1321,7 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
     });
   }
   const bestPractices = buildBestPracticeChecks({ lines, platform, rules, syslog, failover, version });
+  const securityActivity = buildSecurityActivityFlags(syslog.events, rules, findings);
 
   return {
     fileName,
@@ -1239,6 +1344,7 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
     failover,
     bestPractices,
     networkObjects,
+    securityActivity,
   };
 }
 
@@ -1298,6 +1404,8 @@ function App() {
   const [practiceStatus, setPracticeStatus] = useState("ALL");
   const [objectQuery, setObjectQuery] = useState("");
   const [objectKind, setObjectKind] = useState("ALL");
+  const [activityQuery, setActivityQuery] = useState("");
+  const [activitySeverity, setActivitySeverity] = useState("ALL");
   const [dragging, setDragging] = useState(false);
   const [colorPalette, setColorPalette] = useState<ColorPalette>(() => {
     const saved = window.localStorage.getItem("asa-analyzer-palette");
@@ -1444,6 +1552,18 @@ function App() {
     });
   }, [analysis.networkObjects, objectKind, objectQuery]);
 
+  const filteredSecurityActivity = useMemo(() => {
+    const normalizedQuery = activityQuery.trim().toLowerCase();
+    return analysis.securityActivity.filter((flag) => {
+      const matchesSeverity = activitySeverity === "ALL" || flag.severity === activitySeverity;
+      const matchesQuery = !normalizedQuery || [flag.title, flag.detail, flag.category, flag.timestamp, flag.sourceLine]
+        .join(" ")
+        .toLowerCase()
+        .includes(normalizedQuery);
+      return matchesSeverity && matchesQuery;
+    });
+  }, [activityQuery, activitySeverity, analysis.securityActivity]);
+
   function handleFile(file?: File) {
     if (!file) return;
     const reader = new FileReader();
@@ -1461,6 +1581,7 @@ function App() {
 
   const viewButtons = [
     { id: "summary", label: "Summary", icon: <BarChart3 size={16} /> },
+    { id: "activity", label: "Security Activity", icon: <Activity size={16} /> },
     { id: "interfaces", label: "Interfaces", icon: <Network size={16} /> },
     { id: "objects", label: "Objects", icon: <Globe2 size={16} /> },
     { id: "routing", label: "Routing", icon: <Route size={16} /> },
@@ -1517,6 +1638,7 @@ function App() {
           natRules: analysis.nats.length,
           policyRules: analysis.rules.length,
           directionCounts,
+          securityActivityFlags: analysis.securityActivity.map(({ severity, category, title, detail, timestamp }) => ({ severity, category, title, detail, timestamp })),
           findings: analysis.findings.map(({ severity, label, detail }) => ({ severity, label, detail })),
           syslogEvents: analysis.syslog.events.length,
           syslogHosts: analysis.syslog.hosts.length,
@@ -1683,6 +1805,7 @@ function App() {
               <Badge tone="good">Updated</Badge>
             </div>
             <ul>
+              <li><strong>Security activity flags:</strong> Prioritized traffic, policy exposure, configuration change, and platform signals now appear in a dedicated view.</li>
               <li><strong>Network object inventory:</strong> Review named IP aliases, hosts, subnets, ranges, FQDNs, and object-group members in one searchable view.</li>
               <li><strong>Richer rule analysis:</strong> ACP / ACL results now include application ID, geolocation, and logging details when present.</li>
               <li><strong>Flexible appearance:</strong> Use the palette control in the header to cycle through the available interface color themes.</li>
@@ -1709,6 +1832,76 @@ function App() {
                 </article>
               ))}
             </div>
+          </section>
+        </section>
+      )}
+
+      {activeView === "activity" && (
+        <section className="panel-grid security-activity-view">
+          <div className="summary-grid">
+            <SummaryCard icon={<Flag size={18} />} label="All flags" value={analysis.securityActivity.length} detail={`${filteredSecurityActivity.length} currently shown`} />
+            <SummaryCard icon={<AlertTriangle size={18} />} label="High priority" value={analysis.securityActivity.filter((flag) => flag.severity === "critical" || flag.severity === "high").length} detail="Critical and high activity" />
+            <SummaryCard icon={<Shield size={18} />} label="Blocked" value={analysis.securityActivity.filter((flag) => flag.category === "Blocked Traffic").length} detail="Denied or dropped traffic" />
+            <SummaryCard icon={<Activity size={18} />} label="Changes" value={analysis.securityActivity.filter((flag) => flag.category === "Configuration Change").length} detail="Administrative activity" />
+          </div>
+
+          <section className="wide-panel">
+            <div className="section-heading">
+              <div>
+                <h2>Security Activity Flags</h2>
+                <p>Prioritized traffic, policy, administrative, and platform signals derived from the uploaded show-tech.</p>
+              </div>
+              <Badge tone={analysis.securityActivity.some((flag) => flag.animated) ? "danger" : "good"}>
+                {analysis.securityActivity.filter((flag) => flag.animated).length} active alert(s)
+              </Badge>
+            </div>
+            <div className="rule-toolbar activity-toolbar">
+              <label className="search-box">
+                <Search size={16} />
+                <input value={activityQuery} onChange={(event) => setActivityQuery(event.target.value)} placeholder="Search activity, categories, or evidence" />
+              </label>
+              <label className="select-box">
+                <Filter size={16} />
+                <select value={activitySeverity} onChange={(event) => setActivitySeverity(event.target.value)}>
+                  <option value="ALL">All severities</option>
+                  <option value="critical">Critical</option>
+                  <option value="high">High</option>
+                  <option value="medium">Medium</option>
+                  <option value="low">Low</option>
+                  <option value="info">Info</option>
+                </select>
+                <ChevronDown size={15} />
+              </label>
+            </div>
+            {filteredSecurityActivity.length ? (
+              <div className="security-flag-list">
+                {filteredSecurityActivity.map((flag) => (
+                  <article key={flag.id} className={`security-flag security-flag-${flag.severity} ${flag.animated ? "security-flag-active" : ""}`}>
+                    <div className="security-flag-icon" aria-hidden="true"><Flag size={18} /></div>
+                    <div className="security-flag-body">
+                      <div className="security-flag-heading">
+                        <div>
+                          <h3>{flag.title}</h3>
+                          <p>{flag.detail}</p>
+                        </div>
+                        <div className="security-flag-badges">
+                          <Badge tone={flag.severity === "critical" || flag.severity === "high" ? "danger" : flag.severity === "medium" ? "warning" : flag.severity === "low" ? "good" : "neutral"}>{flag.severity}</Badge>
+                          <Badge tone="neutral">{flag.category}</Badge>
+                        </div>
+                      </div>
+                      {flag.timestamp || flag.sourceLine ? (
+                        <div className="security-flag-evidence">
+                          {flag.timestamp ? <span>{flag.timestamp}</span> : null}
+                          {flag.sourceLine ? <code>{flag.sourceLine}</code> : null}
+                        </div>
+                      ) : null}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState label="No security activity flags match the current filters." />
+            )}
           </section>
         </section>
       )}
