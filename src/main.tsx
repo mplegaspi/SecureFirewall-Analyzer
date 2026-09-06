@@ -4,12 +4,14 @@ import {
   AlertTriangle,
   Activity,
   ArrowDownUp,
+  ArrowUpCircle,
   BadgeCheck,
   BarChart3,
   CheckCircle2,
   ChevronDown,
   Compass,
   Download,
+  ExternalLink,
   FileSearch,
   Filter,
   Flag,
@@ -24,6 +26,7 @@ import {
   ScrollText,
   Server,
   Shield,
+  ShieldAlert,
   Shuffle,
   SlidersHorizontal,
   Upload,
@@ -221,6 +224,24 @@ type SecurityActivityFlag = {
   animated: boolean;
 };
 
+type VersionAdvisoryItem = {
+  id: string;
+  severity: "critical" | "high" | "medium" | "info";
+  title: string;
+  summary: string;
+  applicability: string;
+  url: string;
+};
+
+type VersionAdvisory = {
+  status: "upgrade-recommended" | "verify-current" | "not-detected";
+  installed: string;
+  recommended: string;
+  rationale: string;
+  reviewedAsOf: string;
+  items: VersionAdvisoryItem[];
+};
+
 type Analysis = {
   fileName: string;
   size: number;
@@ -243,6 +264,7 @@ type Analysis = {
   bestPractices: BestPracticeCheck[];
   networkObjects: NetworkObject[];
   securityActivity: SecurityActivityFlag[];
+  versionAdvisory: VersionAdvisory;
 };
 
 type SortKey =
@@ -807,6 +829,104 @@ function buildSecurityActivityFlags(
   return flags.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
 }
 
+const ciscoGuidance = {
+  softwareChecker: "https://sec.cloudapps.cisco.com/security/center/softwarechecker.x",
+  asaCompatibility: "https://www.cisco.com/c/en/us/td/docs/security/asa/compatibility/asamatrx.html",
+  ftdCompatibility: "https://www.cisco.com/c/en/us/td/docs/security/secure-firewall/compatibility/threat-defense-compatibility.html",
+  asa918Eol: "https://www.cisco.com/c/en/us/products/collateral/security/asa-firepower-services/asa-9-18-asav-asdm-release-7-18-eol.html",
+  vpnDos: "https://www.cisco.com/c/en/us/support/docs/csa/cisco-sa-asaftd-vpn-dos-dzv4mQFF.html",
+};
+
+function buildVersionAdvisory(platform: Analysis["platform"], version: string, model: string, lines: string[]): VersionAdvisory {
+  const reviewedAsOf = "September 6, 2026";
+  const installed = version ? `${platform} ${version}` : `${platform} version not detected`;
+  if (!version || platform === "UNKNOWN") {
+    return {
+      status: "not-detected",
+      installed,
+      recommended: "Identify the exact software release first",
+      rationale: "A release-specific recommendation requires the platform, version, and hardware model.",
+      reviewedAsOf,
+      items: [],
+    };
+  }
+
+  const normalizedVersion = version.replace(/[()]/g, ".").replace(/\.+/g, ".").replace(/\.$/, "");
+  const versionParts = normalizedVersion.match(/\d+/g)?.map(Number) || [];
+  const majorMinor = versionParts.length >= 2 ? `${versionParts[0]}.${versionParts[1]}` : normalizedVersion;
+  const isRemoteAccessVpnConfigured = lines.some((line) => /^\s*webvpn\b/i.test(line) || /remote-access|anyconnect/i.test(line));
+  const items: VersionAdvisoryItem[] = [];
+
+  if (platform === "ASA") {
+    if (majorMinor === "9.18") {
+      items.push({
+        id: "asa-918-lifecycle",
+        severity: "high",
+        title: "ASA 9.18(x) is in its end-of-life cycle",
+        summary: "Cisco ended sales for ASA 9.18(x) on November 18, 2025. Software maintenance and planned vulnerability/security fixes end November 18, 2026; final support ends November 30, 2027.",
+        applicability: "Matches the detected ASA 9.18 release train.",
+        url: ciscoGuidance.asa918Eol,
+      });
+    }
+
+    const interimBuild = versionParts[3] || 0;
+    if (majorMinor === "9.18" && (versionParts[2] || 0) <= 4 && interimBuild < 50) {
+      items.push({
+        id: "asa-ftd-vpn-dos-2026",
+        severity: isRemoteAccessVpnConfigured ? "critical" : "high",
+        title: "Remote Access SSL VPN denial-of-service advisory",
+        summary: "Cisco reports active exploitation and lists ASA 9.18(4.50) as the fixed 9.18 interim release. Use the Software Checker to confirm the exact affected build and combined first-fixed release.",
+        applicability: isRemoteAccessVpnConfigured
+          ? "Remote-access VPN configuration signals were found; prioritize validation and remediation."
+          : "Potentially affected by version. Remote-access VPN exposure was not confirmed in the parsed text.",
+        url: ciscoGuidance.vpnDos,
+      });
+    }
+
+    const isFirepower2100 = /\b(?:Firepower|FPR)\s*21(?:10|20|30|40)\b/i.test(model);
+    if (isFirepower2100 && (versionParts[0] || 0) === 9 && (versionParts[1] || 0) < 20) {
+      return {
+        status: "upgrade-recommended",
+        installed,
+        recommended: "ASA 9.20(4.235) or later 9.20(4) interim",
+        rationale: "Cisco lists ASA 9.20(x) as the final supported train for Firepower 2100 and identifies 9.20(4.235) as a fixed release for the current VPN advisory. Confirm the gold-star build and upgrade path before change control.",
+        reviewedAsOf,
+        items,
+      };
+    }
+
+    if (majorMinor === "9.18") {
+      return {
+        status: "upgrade-recommended",
+        installed,
+        recommended: "ASA 9.20(x) or the latest model-compatible fixed release",
+        rationale: "Cisco names ASA 9.20 as the migration replacement for ASA 9.18 on supported appliances. Hardware compatibility and any FXOS/ASDM requirements must be confirmed first.",
+        reviewedAsOf,
+        items,
+      };
+    }
+
+    return {
+      status: "verify-current",
+      installed,
+      recommended: "Latest Cisco gold-star release supported by this model",
+      rationale: "Confirm the exact interim build with Cisco Software Checker and validate the hardware, ASDM, and FXOS compatibility matrix before upgrading.",
+      reviewedAsOf,
+      items,
+    };
+  }
+
+  const isBelowFtd76 = (versionParts[0] || 0) < 7 || ((versionParts[0] || 0) === 7 && (versionParts[1] || 0) < 6);
+  return {
+    status: isBelowFtd76 ? "upgrade-recommended" : "verify-current",
+    installed,
+    recommended: "FTD 7.6.4 with the latest available patch",
+    rationale: "Cisco currently identifies FTD 7.6.4 as the suggested release for eligible appliances. Confirm model, FMC, FXOS, feature, and staged upgrade-path compatibility before deployment.",
+    reviewedAsOf,
+    items,
+  };
+}
+
 function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysis {
   const lines = splitLines(text);
   const interfaces: InterfaceInfo[] = [];
@@ -1322,6 +1442,7 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
   }
   const bestPractices = buildBestPracticeChecks({ lines, platform, rules, syslog, failover, version });
   const securityActivity = buildSecurityActivityFlags(syslog.events, rules, findings);
+  const versionAdvisory = buildVersionAdvisory(platform, version, model, lines);
 
   return {
     fileName,
@@ -1345,6 +1466,7 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
     bestPractices,
     networkObjects,
     securityActivity,
+    versionAdvisory,
   };
 }
 
@@ -1582,6 +1704,7 @@ function App() {
   const viewButtons = [
     { id: "summary", label: "Summary", icon: <BarChart3 size={16} /> },
     { id: "activity", label: "Security Activity", icon: <Activity size={16} /> },
+    { id: "advisory", label: "Version Advisory", icon: <ShieldAlert size={16} /> },
     { id: "interfaces", label: "Interfaces", icon: <Network size={16} /> },
     { id: "objects", label: "Objects", icon: <Globe2 size={16} /> },
     { id: "routing", label: "Routing", icon: <Route size={16} /> },
@@ -1639,6 +1762,7 @@ function App() {
           policyRules: analysis.rules.length,
           directionCounts,
           securityActivityFlags: analysis.securityActivity.map(({ severity, category, title, detail, timestamp }) => ({ severity, category, title, detail, timestamp })),
+          versionAdvisory: analysis.versionAdvisory,
           findings: analysis.findings.map(({ severity, label, detail }) => ({ severity, label, detail })),
           syslogEvents: analysis.syslog.events.length,
           syslogHosts: analysis.syslog.hosts.length,
@@ -1805,6 +1929,7 @@ function App() {
               <Badge tone="good">Updated</Badge>
             </div>
             <ul>
+              <li><strong>Version advisory:</strong> Compare the detected software and hardware with version-matched Cisco lifecycle, security, and upgrade guidance.</li>
               <li><strong>Security activity flags:</strong> Prioritized traffic, policy exposure, configuration change, and platform signals now appear in a dedicated view.</li>
               <li><strong>Network object inventory:</strong> Review named IP aliases, hosts, subnets, ranges, FQDNs, and object-group members in one searchable view.</li>
               <li><strong>Richer rule analysis:</strong> ACP / ACL results now include application ID, geolocation, and logging details when present.</li>
@@ -1902,6 +2027,75 @@ function App() {
             ) : (
               <EmptyState label="No security activity flags match the current filters." />
             )}
+          </section>
+        </section>
+      )}
+
+      {activeView === "advisory" && (
+        <section className="panel-grid advisory-view">
+          <div className="summary-grid">
+            <SummaryCard icon={<Shield size={18} />} label="Installed" value={analysis.version || "Unknown"} detail={`${analysis.platform}${analysis.model ? ` · ${analysis.model}` : ""}`} />
+            <SummaryCard icon={<ArrowUpCircle size={18} />} label="Recommended" value={analysis.versionAdvisory.recommended} detail="Validate before change control" />
+            <SummaryCard icon={<ShieldAlert size={18} />} label="Advisories" value={analysis.versionAdvisory.items.length} detail={`${analysis.versionAdvisory.items.filter((item) => item.severity === "critical" || item.severity === "high").length} high priority`} />
+            <SummaryCard icon={<CheckCircle2 size={18} />} label="Guidance date" value={analysis.versionAdvisory.reviewedAsOf} detail="Recheck Cisco before upgrade" />
+          </div>
+
+          <section className={`wide-panel upgrade-recommendation upgrade-${analysis.versionAdvisory.status}`}>
+            <div className="upgrade-icon"><ArrowUpCircle size={24} /></div>
+            <div>
+              <span className="eyebrow">Recommended upgrade target</span>
+              <h2>{analysis.versionAdvisory.recommended}</h2>
+              <p>{analysis.versionAdvisory.rationale}</p>
+              <div className="upgrade-meta">
+                <Badge tone={analysis.versionAdvisory.status === "upgrade-recommended" ? "danger" : analysis.versionAdvisory.status === "verify-current" ? "warning" : "neutral"}>
+                  {analysis.versionAdvisory.status.replace(/-/g, " ")}
+                </Badge>
+                <span>Installed: {analysis.versionAdvisory.installed}</span>
+              </div>
+            </div>
+          </section>
+
+          <section className="wide-panel">
+            <div className="section-heading">
+              <div>
+                <h2>Security & Lifecycle Advisories</h2>
+                <p>Version-matched Cisco notices. Applicability can also depend on enabled features, hardware, and the exact interim build.</p>
+              </div>
+              <Badge tone="neutral">As of {analysis.versionAdvisory.reviewedAsOf}</Badge>
+            </div>
+            {analysis.versionAdvisory.items.length ? (
+              <div className="advisory-list">
+                {analysis.versionAdvisory.items.map((item) => (
+                  <article key={item.id} className={`advisory-item advisory-${item.severity}`}>
+                    <div className="advisory-icon"><ShieldAlert size={19} /></div>
+                    <div>
+                      <div className="advisory-heading">
+                        <h3>{item.title}</h3>
+                        <Badge tone={item.severity === "critical" || item.severity === "high" ? "danger" : item.severity === "medium" ? "warning" : "neutral"}>{item.severity}</Badge>
+                      </div>
+                      <p>{item.summary}</p>
+                      <div className="advisory-applicability"><strong>Applicability:</strong> {item.applicability}</div>
+                      <a href={item.url} target="_blank" rel="noreferrer">Read Cisco advisory <ExternalLink size={14} /></a>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <EmptyState label="No version-specific advisory is bundled for this detected release. Use Cisco Software Checker for a current assessment." />
+            )}
+          </section>
+
+          <section className="wide-panel official-guidance">
+            <div className="section-heading">
+              <div>
+                <h2>Verify Before Upgrading</h2>
+                <p>This analyzer provides decision support, not a substitute for Cisco’s live compatibility and vulnerability results.</p>
+              </div>
+            </div>
+            <div className="guidance-links advisory-links">
+              <a href={ciscoGuidance.softwareChecker} target="_blank" rel="noreferrer"><span>Cisco Software Checker</span><small>Confirm affected advisories and combined first-fixed release.</small><ExternalLink size={16} /></a>
+              <a href={analysis.platform === "FTD" ? ciscoGuidance.ftdCompatibility : ciscoGuidance.asaCompatibility} target="_blank" rel="noreferrer"><span>{analysis.platform === "FTD" ? "FTD" : "ASA"} compatibility guidance</span><small>Validate hardware, manager, FXOS, ASDM, and upgrade path.</small><ExternalLink size={16} /></a>
+            </div>
           </section>
         </section>
       )}

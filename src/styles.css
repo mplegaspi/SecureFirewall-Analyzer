@@ -310,7 +310,7 @@ h2 {
 
 .view-tabs {
   display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-template-columns: repeat(13, minmax(0, 1fr));
   gap: 6px;
   margin: 16px 0;
   padding: 6px;
@@ -705,6 +705,162 @@ tbody tr:last-child td {
 
 .security-flag-evidence code {
   margin: 0;
+}
+
+.advisory-view .metric-card strong {
+  font-size: 1.1rem;
+  letter-spacing: 0.01em;
+  text-transform: none;
+}
+
+.upgrade-recommendation {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 15px;
+  border-left: 5px solid var(--green);
+}
+
+.upgrade-upgrade-recommended {
+  border-left-color: var(--red);
+}
+
+.upgrade-verify-current {
+  border-left-color: var(--yellow);
+}
+
+.upgrade-icon,
+.advisory-icon {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 9px;
+  color: var(--green);
+  background: var(--subtle);
+}
+
+.upgrade-upgrade-recommended .upgrade-icon {
+  color: var(--red);
+  background: color-mix(in srgb, var(--red) 11%, var(--control));
+}
+
+.upgrade-recommendation .eyebrow {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.upgrade-recommendation h2 {
+  margin: 4px 0 6px;
+}
+
+.upgrade-recommendation p {
+  max-width: 920px;
+  margin: 0;
+}
+
+.upgrade-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.advisory-list {
+  display: grid;
+  gap: 10px;
+}
+
+.advisory-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 12px;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--neutral-bar);
+  border-radius: 8px;
+  background: var(--control);
+}
+
+.advisory-critical,
+.advisory-high {
+  border-left-color: var(--red);
+}
+
+.advisory-medium {
+  border-left-color: var(--yellow);
+}
+
+.advisory-critical .advisory-icon,
+.advisory-high .advisory-icon {
+  color: var(--red);
+}
+
+.advisory-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.advisory-heading h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.advisory-item p {
+  margin: 6px 0;
+}
+
+.advisory-applicability {
+  margin: 10px 0;
+  padding: 9px 11px;
+  border-radius: 7px;
+  color: var(--muted);
+  background: var(--subtle);
+  font-size: 0.88rem;
+}
+
+.advisory-item a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green-dark);
+  font-weight: 750;
+  text-decoration: none;
+}
+
+.advisory-item a:hover,
+.advisory-item a:focus-visible {
+  text-decoration: underline;
+}
+
+.advisory-links a {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+}
+
+.advisory-links a span {
+  align-self: end;
+}
+
+.advisory-links a small {
+  grid-column: 1;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.advisory-links a svg {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
 }
 
 .object-table {
@@ -1385,7 +1541,8 @@ tbody tr:last-child td {
 
   .practice-hero,
   .practice-item-heading,
-  .security-flag-heading {
+  .security-flag-heading,
+  .advisory-heading {
     align-items: stretch;
     flex-direction: column;
   }
@@ -1401,6 +1558,11 @@ tbody tr:last-child td {
 
   .security-flag-badges {
     justify-content: flex-start;
+  }
+
+  .upgrade-recommendation,
+  .advisory-item {
+    grid-template-columns: 1fr;
   }
 
   .guidance-links {
