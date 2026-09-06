@@ -193,6 +193,19 @@ type BestPracticeCheck = {
   evidence: string[];
 };
 
+type NetworkObjectKind = "ip" | "host" | "network" | "fqdn" | "range" | "reference";
+
+type NetworkObject = {
+  id: string;
+  name: string;
+  kind: NetworkObjectKind;
+  value: string;
+  mask?: string;
+  fqdnVersion?: string;
+  parentGroup?: string;
+  sourceLine: string;
+};
+
 type Analysis = {
   fileName: string;
   size: number;
@@ -213,6 +226,7 @@ type Analysis = {
   syslog: SyslogInfo;
   failover: FailoverInfo;
   bestPractices: BestPracticeCheck[];
+  networkObjects: NetworkObject[];
 };
 
 type SortKey =
@@ -281,6 +295,13 @@ object network WEB-SERVER
  host 172.16.20.25
 object network INSIDE-USERS
  subnet 10.20.0.0 255.255.0.0
+object network UPDATE-SERVICE
+ fqdn v4 updates.example.com
+name 10.20.40.25 SYSLOG-COLLECTOR
+object-group network INTERNAL-SERVERS
+ network-object host 10.20.30.15
+ network-object 10.30.0.0 255.255.0.0
+ network-object object WEB-SERVER
 nat (inside,outside) source dynamic INSIDE-USERS interface
 nat (dmz,outside) source static WEB-SERVER WEB-SERVER service tcp www www
 access-list OUTSIDE-IN extended permit tcp any object WEB-SERVER eq www
@@ -689,6 +710,8 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
   const nats: NatInfo[] = [];
   const rules: PolicyRule[] = [];
   const findings: Finding[] = [];
+  const networkObjects: NetworkObject[] = [];
+  const networkObjectKeys = new Set<string>();
   const syslog: SyslogInfo = {
     enabled: false,
     timestamps: false,
@@ -717,6 +740,14 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
   let platform: Analysis["platform"] = "UNKNOWN";
   let currentInterface: InterfaceInfo | null = null;
   let currentNetworkObject: { name: string; definition?: string } | null = null;
+  let currentNetworkGroup: string | null = null;
+
+  const addNetworkObject = (object: Omit<NetworkObject, "id">) => {
+    const key = [object.name, object.kind, object.value, object.mask, object.fqdnVersion, object.parentGroup].join("|").toLowerCase();
+    if (networkObjectKeys.has(key)) return;
+    networkObjectKeys.add(key);
+    networkObjects.push({ ...object, id: `network-object-${networkObjects.length + 1}` });
+  };
 
   lines.forEach((raw, index) => {
     const line = raw.trim();
@@ -850,6 +881,25 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
 
     if (!raw.startsWith(" ") && !/^interface\s+/i.test(line)) currentInterface = null;
     if (!raw.startsWith(" ") && !/^object network\s+/i.test(line)) currentNetworkObject = null;
+    if (!raw.startsWith(" ") && !/^object-group network\s+/i.test(line)) currentNetworkGroup = null;
+
+    const nameObjectMatch = line.match(/^name\s+(\S+)\s+(\S+)(?:\s+description\s+.+)?$/i);
+    if (nameObjectMatch) {
+      addNetworkObject({
+        name: nameObjectMatch[2],
+        kind: "ip",
+        value: nameObjectMatch[1],
+        sourceLine: line,
+      });
+    }
+
+    const objectGroupMatch = line.match(/^object-group network\s+(.+)$/i);
+    if (objectGroupMatch) {
+      currentInterface = null;
+      currentNetworkObject = null;
+      currentNetworkGroup = objectGroupMatch[1];
+      return;
+    }
 
     const objectMatch = line.match(/^object network\s+(.+)$/i);
     if (objectMatch) {
@@ -859,8 +909,36 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
     }
 
     if (currentNetworkObject && raw.startsWith(" ")) {
-      const definitionMatch = line.match(/^(?:host|subnet|range)\s+(.+)$/i);
-      if (definitionMatch) currentNetworkObject.definition = line;
+      const hostMatch = line.match(/^host\s+(\S+)$/i);
+      const subnetMatch = line.match(/^subnet\s+(\S+)\s+(\S+)$/i);
+      const rangeMatch = line.match(/^range\s+(\S+)\s+(\S+)$/i);
+      const fqdnMatch = line.match(/^fqdn(?:\s+(v4|v6))?\s+(\S+)$/i);
+      if (hostMatch) {
+        currentNetworkObject.definition = line;
+        addNetworkObject({ name: currentNetworkObject.name, kind: "host", value: hostMatch[1], sourceLine: line });
+      } else if (subnetMatch) {
+        currentNetworkObject.definition = line;
+        addNetworkObject({ name: currentNetworkObject.name, kind: "network", value: subnetMatch[1], mask: subnetMatch[2], sourceLine: line });
+      } else if (rangeMatch) {
+        currentNetworkObject.definition = line;
+        addNetworkObject({ name: currentNetworkObject.name, kind: "range", value: `${rangeMatch[1]} – ${rangeMatch[2]}`, sourceLine: line });
+      } else if (fqdnMatch) {
+        currentNetworkObject.definition = line;
+        addNetworkObject({ name: currentNetworkObject.name, kind: "fqdn", value: fqdnMatch[2], fqdnVersion: fqdnMatch[1]?.toUpperCase(), sourceLine: line });
+      }
+    }
+
+    if (currentNetworkGroup && raw.startsWith(" ")) {
+      const groupHostMatch = line.match(/^network-object host\s+(\S+)$/i);
+      const groupObjectMatch = line.match(/^(?:network-object object|group-object)\s+(\S+)$/i);
+      const groupNetworkMatch = line.match(/^network-object\s+(\S+)\s+(\S+)$/i);
+      if (groupHostMatch) {
+        addNetworkObject({ name: currentNetworkGroup, kind: "host", value: groupHostMatch[1], parentGroup: currentNetworkGroup, sourceLine: line });
+      } else if (groupObjectMatch) {
+        addNetworkObject({ name: currentNetworkGroup, kind: "reference", value: groupObjectMatch[1], parentGroup: currentNetworkGroup, sourceLine: line });
+      } else if (groupNetworkMatch) {
+        addNetworkObject({ name: currentNetworkGroup, kind: "network", value: groupNetworkMatch[1], mask: groupNetworkMatch[2], parentGroup: currentNetworkGroup, sourceLine: line });
+      }
     }
 
     const intMatch = line.match(/^interface\s+(.+)$/i);
@@ -1160,6 +1238,7 @@ function parseShowTech(text: string, fileName = "sample-show-tech.txt"): Analysi
     syslog,
     failover,
     bestPractices,
+    networkObjects,
   };
 }
 
@@ -1217,6 +1296,8 @@ function App() {
   const [syslogSeverity, setSyslogSeverity] = useState("ALL");
   const [practiceQuery, setPracticeQuery] = useState("");
   const [practiceStatus, setPracticeStatus] = useState("ALL");
+  const [objectQuery, setObjectQuery] = useState("");
+  const [objectKind, setObjectKind] = useState("ALL");
   const [dragging, setDragging] = useState(false);
   const [colorPalette, setColorPalette] = useState<ColorPalette>(() => {
     const saved = window.localStorage.getItem("asa-analyzer-palette");
@@ -1346,6 +1427,23 @@ function App() {
       .sort((a, b) => statusRank[a.status] - statusRank[b.status] || priorityRank[a.priority] - priorityRank[b.priority]);
   }, [analysis.bestPractices, practiceQuery, practiceStatus]);
 
+  const filteredNetworkObjects = useMemo(() => {
+    const normalizedQuery = objectQuery.trim().toLowerCase();
+    return analysis.networkObjects.filter((object) => {
+      const matchesKind = objectKind === "ALL" || object.kind === objectKind;
+      const matchesQuery = !normalizedQuery || [
+        object.name,
+        object.kind,
+        object.value,
+        object.mask,
+        object.fqdnVersion,
+        object.parentGroup,
+        object.sourceLine,
+      ].join(" ").toLowerCase().includes(normalizedQuery);
+      return matchesKind && matchesQuery;
+    });
+  }, [analysis.networkObjects, objectKind, objectQuery]);
+
   function handleFile(file?: File) {
     if (!file) return;
     const reader = new FileReader();
@@ -1364,6 +1462,7 @@ function App() {
   const viewButtons = [
     { id: "summary", label: "Summary", icon: <BarChart3 size={16} /> },
     { id: "interfaces", label: "Interfaces", icon: <Network size={16} /> },
+    { id: "objects", label: "Objects", icon: <Globe2 size={16} /> },
     { id: "routing", label: "Routing", icon: <Route size={16} /> },
     { id: "nat", label: "NAT", icon: <Shuffle size={16} /> },
     { id: "rules", label: "Rules", icon: <ListTree size={16} /> },
@@ -1409,6 +1508,11 @@ function App() {
           platform: analysis.platform,
           version: analysis.version,
           interfaces: analysis.interfaces.length,
+          networkObjects: analysis.networkObjects.length,
+          objectCounts: analysis.networkObjects.reduce<Record<string, number>>((counts, object) => {
+            counts[object.kind] = (counts[object.kind] || 0) + 1;
+            return counts;
+          }, {}),
           routes: analysis.routes.length,
           natRules: analysis.nats.length,
           policyRules: analysis.rules.length,
@@ -1579,6 +1683,7 @@ function App() {
               <Badge tone="good">Updated</Badge>
             </div>
             <ul>
+              <li><strong>Network object inventory:</strong> Review named IP aliases, hosts, subnets, ranges, FQDNs, and object-group members in one searchable view.</li>
               <li><strong>Richer rule analysis:</strong> ACP / ACL results now include application ID, geolocation, and logging details when present.</li>
               <li><strong>Flexible appearance:</strong> Use the palette control in the header to cycle through the available interface color themes.</li>
               <li><strong>Same local-first workflow:</strong> Uploaded show-tech files continue to be parsed in your browser.</li>
@@ -1646,6 +1751,77 @@ function App() {
           ) : (
             <EmptyState label="No interface sections were detected." />
           )}
+        </section>
+      )}
+
+      {activeView === "objects" && (
+        <section className="panel-grid object-view">
+          <div className="summary-grid">
+            <SummaryCard icon={<Globe2 size={18} />} label="All mappings" value={analysis.networkObjects.length} detail={`${filteredNetworkObjects.length} currently shown`} />
+            <SummaryCard icon={<Server size={18} />} label="Hosts" value={analysis.networkObjects.filter((object) => object.kind === "host").length} detail="Single-address objects" />
+            <SummaryCard icon={<Network size={18} />} label="Networks" value={analysis.networkObjects.filter((object) => object.kind === "network").length} detail="Subnet and mask pairs" />
+            <SummaryCard icon={<Globe2 size={18} />} label="FQDNs" value={analysis.networkObjects.filter((object) => object.kind === "fqdn").length} detail={`${analysis.networkObjects.filter((object) => object.kind === "ip" || object.kind === "range").length} IP aliases or ranges`} />
+          </div>
+
+          <section className="wide-panel">
+            <div className="section-heading">
+              <div>
+                <h2>Network Object Inventory</h2>
+                <p>Named IP aliases, hosts, subnets, ranges, FQDNs, and object-group members found in the uploaded configuration.</p>
+              </div>
+              <Badge tone="neutral">{filteredNetworkObjects.length} shown</Badge>
+            </div>
+            <div className="rule-toolbar object-toolbar">
+              <label className="search-box">
+                <Search size={16} />
+                <input value={objectQuery} onChange={(event) => setObjectQuery(event.target.value)} placeholder="Search names, addresses, FQDNs, or groups" />
+              </label>
+              <label className="select-box">
+                <Filter size={16} />
+                <select value={objectKind} onChange={(event) => setObjectKind(event.target.value)}>
+                  <option value="ALL">All object types</option>
+                  <option value="ip">IP aliases</option>
+                  <option value="host">Hosts</option>
+                  <option value="network">Networks</option>
+                  <option value="fqdn">FQDNs</option>
+                  <option value="range">Ranges</option>
+                  <option value="reference">Group references</option>
+                </select>
+                <ChevronDown size={15} />
+              </label>
+            </div>
+            {filteredNetworkObjects.length ? (
+              <div className="table-wrap">
+                <table className="object-table">
+                  <thead>
+                    <tr>
+                      <th>Object / Group</th>
+                      <th>Type</th>
+                      <th>Mapping</th>
+                      <th>Scope</th>
+                      <th>Source</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredNetworkObjects.map((object) => (
+                      <tr key={object.id}>
+                        <td><strong>{object.name}</strong></td>
+                        <td><Badge tone={object.kind === "fqdn" ? "east" : object.kind === "host" ? "good" : object.kind === "network" ? "north" : "neutral"}>{object.kind}</Badge></td>
+                        <td>
+                          <strong>{object.value}{object.mask ? ` ${object.mask}` : ""}</strong>
+                          {object.fqdnVersion ? <span>{object.fqdnVersion}</span> : null}
+                        </td>
+                        <td>{object.parentGroup ? `Member of ${object.parentGroup}` : object.kind === "ip" ? "Global name alias" : "Network object"}</td>
+                        <td><code>{object.sourceLine}</code></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState label="No network objects match the current filters." />
+            )}
+          </section>
         </section>
       )}
 

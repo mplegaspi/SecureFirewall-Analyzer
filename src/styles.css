@@ -310,7 +310,7 @@ h2 {
 
 .view-tabs {
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(11, minmax(0, 1fr));
   gap: 6px;
   margin: 16px 0;
   padding: 6px;
@@ -579,6 +579,36 @@ tbody tr:last-child td {
 
 .syslog-toolbar {
   grid-template-columns: minmax(260px, 1fr) minmax(210px, 280px);
+}
+
+.object-toolbar {
+  grid-template-columns: minmax(260px, 1fr) minmax(210px, 280px);
+}
+
+.object-table {
+  min-width: 980px;
+}
+
+.object-table td:first-child,
+.object-table td:nth-child(3) {
+  min-width: 180px;
+}
+
+.object-table td:nth-child(3) strong,
+.object-table td:nth-child(3) span {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.object-table td:nth-child(3) span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.object-table code {
+  min-width: 220px;
+  white-space: pre-wrap;
 }
 
 .compact-table {
@@ -1206,7 +1236,8 @@ tbody tr:last-child td {
   .rule-toolbar,
   .syslog-toolbar,
   .practice-toolbar,
-  .nat-toolbar {
+  .nat-toolbar,
+  .object-toolbar {
     grid-template-columns: 1fr;
   }
 
